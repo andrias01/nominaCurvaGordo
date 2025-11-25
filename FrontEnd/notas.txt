@@ -1,0 +1,2 @@
+npm install recharts lucide-react
+lipreria para graficos
