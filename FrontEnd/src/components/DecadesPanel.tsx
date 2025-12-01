@@ -1,8 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import { MESES } from '../mocks/constants';
 import { Employee, Schedule, Shift, WorkTimeConfig } from '../types/schedule';
+
+interface PdfText {
+  text: string;
+  x: number;
+  y: number;
+  size: number;
+}
 
 interface Props {
   schedule: Schedule;
@@ -10,6 +15,61 @@ interface Props {
   onClose: () => void;
   getWorkTimeConfig?: (sede: string, anio: number) => WorkTimeConfig | undefined;
 }
+
+const escapePdfText = (value: string) =>
+  value
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/\r?\n/g, ' ');
+
+const createPdfDocument = (texts: PdfText[]): Uint8Array => {
+  const encoder = new TextEncoder();
+  const byteLength = (value: string) => encoder.encode(value).length;
+  const content = texts
+    .map((item) =>
+      [`BT`, `/F1 ${item.size} Tf`, `${item.x} ${item.y} Td`, `(${escapePdfText(item.text)}) Tj`, `ET`].join(' ')
+    )
+    .join('\n');
+
+  const contentLength = byteLength(content);
+  const objects = [
+    { id: 1, body: '<< /Type /Catalog /Pages 2 0 R >>' },
+    { id: 2, body: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>' },
+    {
+      id: 3,
+      body: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    },
+    { id: 4, body: `<< /Length ${contentLength} >>\nstream\n${content}\nendstream` },
+    { id: 5, body: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>' },
+  ];
+
+  const header = '%PDF-1.4\n';
+  const parts = [header];
+  const offsets: number[] = [0];
+  let cursor = byteLength(header);
+
+  objects.forEach((obj) => {
+    const chunk = `${obj.id} 0 obj\n${obj.body}\nendobj\n`;
+    offsets.push(cursor);
+    parts.push(chunk);
+    cursor += byteLength(chunk);
+  });
+
+  const xrefStart = cursor;
+  const xrefEntries = offsets
+    .map((offset) => offset.toString().padStart(10, '0'))
+    .map((offset, idx) => `${offset} 00000 ${idx === 0 ? 'f' : 'n'} \n`)
+    .join('');
+
+  const xref = `xref\n0 ${objects.length + 1}\n${xrefEntries}`;
+  const trailer = `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+  const pdfString = parts.join('') + xref + trailer;
+  return encoder.encode(pdfString);
+};
+
+const generatePdfBlob = (texts: PdfText[]) => new Blob([createPdfDocument(texts)], { type: 'application/pdf' });
 
 const DecadesPanel: React.FC<Props> = ({ schedule, employees, onClose, getWorkTimeConfig }) => {
   const [viewMonth, setViewMonth] = useState<number>(schedule.mes);
@@ -104,27 +164,46 @@ const DecadesPanel: React.FC<Props> = ({ schedule, employees, onClose, getWorkTi
   const totals = useMemo(computeTotals, [viewMonth, viewYear, assignmentsMap, workers]);
 
   const downloadPDF = () => {
-    const doc = new jsPDF();
-    doc.setFontSize(14);
-    doc.text(`Planilla ${schedule.nombre}`, 14, 18);
-    doc.setFontSize(10);
-    doc.text(`Mes: ${MESES[viewMonth - 1]} ${viewYear} • Sede: ${schedule.sede}`, 14, 26);
+    const columnX = [24, 210, 340, 450, 540];
+    const lineHeight = 16;
+    let y = 780;
+    const rows: PdfText[] = [];
 
-    autoTable(doc, {
-      startY: 32,
-      head: [['Empleado', 'Contrato', 'Horas trabajadas', 'Horas teóricas', 'Saldo']],
-      body: totals.map((t) => [
-        t.nombre,
-        t.tipo.replace('_', ' '),
-        t.horasTrabajadas.toFixed(2),
-        t.horasTeoricas.toFixed(2),
-        t.saldo.toFixed(2),
-      ]),
-      styles: { fontSize: 9 },
-      headStyles: { fillColor: [59, 130, 246] },
+    const addLine = (text: string, size = 10, x = 24) => {
+      rows.push({ text, x, y, size });
+      y -= lineHeight;
+    };
+
+    const addRow = (values: string[], size = 10) => {
+      values.forEach((value, idx) => rows.push({ text: value, x: columnX[idx], y, size }));
+      y -= lineHeight;
+    };
+
+    addLine(`Planilla ${schedule.nombre}`, 14);
+    addLine(`Mes: ${MESES[viewMonth - 1]} ${viewYear} • Sede: ${schedule.sede}`);
+    addLine('');
+    addRow(['Empleado', 'Contrato', 'Horas trabajadas', 'Horas teóricas', 'Saldo'], 10);
+
+    totals.forEach((t) => {
+      addRow(
+        [
+          t.nombre,
+          t.tipo.replace('_', ' '),
+          t.horasTrabajadas.toFixed(2),
+          t.horasTeoricas.toFixed(2),
+          t.saldo.toFixed(2),
+        ],
+        9
+      );
     });
 
-    doc.save(`${schedule.nombre.replace(/\s+/g, '_')}_${viewMonth}_${viewYear}.pdf`);
+    const pdfBlob = generatePdfBlob(rows);
+    const url = URL.createObjectURL(pdfBlob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${schedule.nombre.replace(/\s+/g, '_')}_${viewMonth}_${viewYear}.pdf`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   const daysInMonth = monthDays(viewMonth, viewYear);
